@@ -1,0 +1,1208 @@
+# Building an AI Assistant Using LangChain, LangGraph, Groq, Tavily and Memory
+
+## 1. Project Overview
+
+Today, I learned how to build an AI assistant named **Bolu** using Node.js, Express, LangChain, LangGraph, Groq and Tavily Search.
+
+The main objective was to build an AI assistant that can:
+
+1. Understand user messages.
+2. Generate responses using an LLM.
+3. Maintain conversation history.
+4. Search the internet when external or updated information is required.
+5. Decide automatically whether a tool is needed.
+6. Remember previous messages using LangGraph's checkpointing system.
+
+### Technologies Used
+
+| Technology | Purpose |
+|---|---|
+| Node.js | JavaScript runtime |
+| Express.js | Creates the backend API |
+| LangChain | Connects applications with LLMs and tools |
+| LangGraph | Manages AI workflows and execution |
+| Groq | Provides the LLM |
+| Tavily | Provides web search functionality |
+| MemorySaver | Stores graph checkpoints during runtime |
+| dotenv | Manages environment variables |
+
+---
+
+# 2. Understanding the Basic Architecture
+
+Before understanding the code, we need to understand how all the components communicate.
+
+Our application follows this flow:
+
+**User → Express API → LangGraph → AI Agent → Tool (if needed) → AI Agent → Response**
+
+Let's understand each component.
+
+### 1. User
+
+The user sends a message to our backend.
+
+Example:
+
+"What is the latest news about artificial intelligence?"
+
+### 2. Express API
+
+Express receives the message through an API endpoint.
+
+```js
+app.post("/graph", async (req, res) => {
+    const { input } = req.body;
+});
+```
+
+### 3. LangGraph
+
+LangGraph manages the complete workflow. It maintains the state, executes nodes and controls the flow between the AI agent and tools.
+
+### 4. AI Agent
+
+The AI agent receives the user's message and decides whether it can answer directly or needs a tool.
+
+### 5. Tool
+
+If updated external information is required, the agent can call Tavily Search.
+
+### 6. Final Response
+
+After receiving the tool result, the AI agent processes it and generates a response for the user.
+
+---
+
+# 3. Understanding State in LangGraph
+
+This is one of the most important concepts I learned today.
+
+### What is State?
+
+State is a shared data structure that stores information required during the execution of a LangGraph workflow.
+
+Think of state as a shared container that different nodes can access and update.
+
+For example, our AI assistant needs to maintain:
+
+- User messages.
+- AI responses.
+- Tool calls.
+- Tool results.
+- Conversation history.
+
+Instead of manually creating and managing all these properties, LangGraph provides a built-in state structure.
+
+### What is Annotation?
+
+LangGraph uses `Annotation` to define the structure and behavior of state fields.
+
+For example:
+
+```js
+const State = Annotation.Root({
+    prompt: Annotation,
+    aiMsg: Annotation
+});
+```
+
+Here, we are manually defining a state with two properties:
+
+- `prompt`: Stores the user's input.
+- `aiMsg`: Stores the AI response.
+
+However, for chat applications, LangGraph already provides a built-in state structure called `MessagesAnnotation`.
+
+### What is MessagesAnnotation?
+
+`MessagesAnnotation` is a prebuilt state definition specifically designed for message-based applications.
+
+```js
+import {
+    MessagesAnnotation,
+    StateGraph
+} from "@langchain/langgraph";
+```
+
+We use it like this:
+
+```js
+const graph = new StateGraph(MessagesAnnotation);
+```
+
+It provides a state with a `messages` property.
+
+Conceptually, its structure looks like this:
+
+```js
+{
+    messages: [
+        { role: "user", content: "Hello" },
+        { role: "assistant", content: "Hello! How can I help?" }
+    ]
+}
+```
+
+This is a simplified representation. LangChain messages can contain additional information such as tool calls and metadata.
+
+### Why do we use MessagesAnnotation?
+
+Without it, we would need to define and manage the message state ourselves.
+
+With `MessagesAnnotation`, LangGraph already handles important message-state behavior.
+
+One particularly important feature is its message reducer.
+
+### What is a Reducer?
+
+A reducer determines how new values update an existing state field.
+
+For the `messages` field, the built-in reducer allows new messages to be added to the existing conversation instead of replacing the entire message history.
+
+For example:
+
+Initial state:
+
+```js
+{
+    messages: [
+        { role: "user", content: "Hello" }
+    ]
+}
+```
+
+A node returns:
+
+```js
+{
+    messages: [
+        { role: "assistant", content: "Hi!" }
+    ]
+}
+```
+
+Updated state:
+
+```js
+{
+    messages: [
+        { role: "user", content: "Hello" },
+        { role: "assistant", content: "Hi!" }
+    ]
+}
+```
+
+**Important:** Without the appropriate reducer, updating a state field can replace its previous value. MessagesAnnotation provides the message-specific behavior we need.
+
+### When should we use MessagesAnnotation?
+
+Use it when building:
+
+- Chatbots.
+- AI assistants.
+- Conversational applications.
+- Agents that interact with tools.
+- Applications that require message history.
+
+Use a custom `Annotation.Root()` when your application needs additional state fields or a different state structure.
+
+---
+
+# 4. Understanding StateGraph
+
+`StateGraph` is used to create a graph-based workflow.
+
+A graph consists of:
+
+- Nodes: Functions that perform tasks.
+- Edges: Connections between nodes.
+- State: Shared information passed through the workflow.
+- Conditional edges: Connections selected according to a condition.
+
+Example:
+
+```js
+const graph = new StateGraph(MessagesAnnotation);
+```
+
+Here, we create a graph using the message-based state structure.
+
+But creating a graph is not enough. We need to add nodes and connect them.
+
+### Adding Nodes
+
+```js
+.addNode("agent", callLMM)
+.addNode("tools", toolNode)
+```
+
+A node represents a task in the graph.
+
+In our application, we have two nodes:
+
+**1. agent**
+
+```js
+.addNode("agent", callLMM)
+```
+
+This node executes our AI function. It sends the messages to the LLM and receives its response.
+
+**2. tools**
+
+```js
+.addNode("tools", toolNode)
+```
+
+This node executes the tools requested by the AI agent.
+
+### Adding Edges
+
+An edge defines which node should execute next.
+
+```js
+.addEdge("__start__", "agent")
+```
+
+This means the graph starts by executing the agent node.
+
+```js
+.addEdge("tools", "agent")
+```
+
+After a tool executes, control returns to the agent.
+
+### Conditional Edges
+
+Sometimes, we don't want to follow the same path every time.
+
+For example:
+
+- If the AI wants to search the internet, execute the tools node.
+- If the AI has generated its final answer, stop the graph.
+
+We use conditional edges for this behavior.
+
+```js
+.addConditionalEdges("agent", shouldcontinue)
+```
+
+The `shouldcontinue` function decides which path the graph should follow.
+
+---
+
+# 5. Understanding Groq LLM
+
+An LLM (Large Language Model) is responsible for understanding user messages and generating responses.
+
+We use Groq to access the language model.
+
+```js
+const llm = new ChatGroq({
+    model: "openai/gpt-oss-120b",
+    temperature: 0,
+    maxTokens: 156
+});
+```
+
+### Understanding the configuration
+
+**model**
+
+```js
+model: "openai/gpt-oss-120b"
+```
+
+Specifies which model we want to use.
+
+**temperature**
+
+```js
+temperature: 0
+```
+
+Controls randomness in generated responses.
+
+- Lower temperature: More predictable responses.
+- Higher temperature: More variation and creativity.
+
+**maxTokens**
+
+```js
+maxTokens: 156
+```
+
+Limits the number of tokens generated in the response.
+
+It is an output limit, not the total limit for the conversation input and output.
+
+For longer explanations, we may need a higher limit.
+
+---
+
+# 6. Understanding Tavily Search Tool
+
+Tavily is a search service designed for applications that need web search capabilities.
+
+We use it because an LLM does not automatically know every current event or updated piece of information.
+
+For example:
+
+- Current weather.
+- Latest technology news.
+- Current prices.
+- Recent events.
+- Updated information.
+
+### Creating the Tavily Tool
+
+```js
+const tool = new TavilySearch({
+    maxResults: 5,
+    topic: "general"
+});
+```
+
+**maxResults**
+
+Specifies the maximum number of search results to return.
+
+**topic**
+
+Defines the search topic. Here, we use general search.
+
+### Registering Tools
+
+```js
+const tools = [tool];
+```
+
+We store our available tools inside an array.
+
+Why an array?
+
+Because an AI agent can use multiple tools, not just one.
+
+For example:
+
+```js
+const tools = [
+    searchTool,
+    weatherTool,
+    calculatorTool
+];
+```
+
+These are illustrative names. Each tool must be implemented or imported before being registered.
+
+### Understanding bindTools()
+
+```js
+const llm = new ChatGroq({
+    model: "openai/gpt-oss-120b",
+    temperature: 0
+}).bindTools(tools);
+```
+
+`bindTools()` makes the available tools known to the model.
+
+It allows the model to request a tool when appropriate.
+
+Important distinction:
+
+- `bindTools()` makes tools available to the LLM.
+- It does not execute the tools itself.
+- The graph's tool node executes the requested tools.
+
+The model decides whether to request a tool based on the user's question, system instructions and tool descriptions.
+
+---
+
+# 7. Understanding ToolNode
+
+LangGraph provides a built-in component called `ToolNode`.
+
+```js
+import { ToolNode } from "@langchain/langgraph/prebuilt";
+```
+
+We create it like this:
+
+```js
+const toolNode = new ToolNode(tools);
+```
+
+### What does ToolNode do?
+
+ToolNode is responsible for executing tool calls generated by the AI model.
+
+For example:
+
+User asks:
+
+"What is the latest news about AI?"
+
+The AI decides that web search is required and generates a Tavily tool call.
+
+ToolNode receives that tool call, executes Tavily and adds the tool result to the message history.
+
+The agent can then read the search result and generate a final answer.
+
+**Remember:**
+
+`bindTools()` makes tools available to the model.
+
+`ToolNode()` executes the requested tools.
+
+They have different responsibilities.
+
+---
+
+# 8. Understanding the AI Agent Function
+
+Our AI agent function is:
+
+```js
+const callLMM = async (state) => {
+
+    const response = await llm.invoke([
+        {
+            role: "system",
+            content: "You are Bolu, a smart and reliable AI assistant."
+        },
+        ...state.messages
+    ]);
+
+    return {
+        messages: [response]
+    };
+};
+```
+
+Let's understand it step by step.
+
+### What is state?
+
+The `state` parameter contains the current graph state.
+
+Because we initialized the graph using `MessagesAnnotation`, we can access its messages through:
+
+```js
+state.messages
+```
+
+### What is state.messages?
+
+It is an array containing the messages currently available in the graph.
+
+For example:
+
+```js
+state.messages = [
+    {
+        role: "user",
+        content: "Hello"
+    }
+];
+```
+
+As the graph executes, this array can contain AI messages and tool messages too.
+
+### Understanding the spread operator
+
+```js
+...state.messages
+```
+
+The spread operator expands all elements of an array.
+
+For example:
+
+```js
+const messages = [
+    { role: "user", content: "Hello" },
+    { role: "assistant", content: "Hi!" }
+];
+
+const newMessages = [
+    { role: "system", content: "You are Bolu." },
+    ...messages
+];
+```
+
+Result:
+
+```js
+[
+    { role: "system", content: "You are Bolu." },
+    { role: "user", content: "Hello" },
+    { role: "assistant", content: "Hi!" }
+]
+```
+
+This allows the LLM to receive the system instructions along with the conversation history.
+
+### Understanding llm.invoke()
+
+```js
+const response = await llm.invoke(messages);
+```
+
+This sends the messages to the LLM and waits for its response.
+
+The response can be:
+
+1. A normal AI message.
+2. An AI message containing a tool call.
+
+### Why do we return messages?
+
+```js
+return {
+    messages: [response]
+};
+```
+
+We return the new AI message as a state update.
+
+Because `MessagesAnnotation` uses a message reducer, the new message is added to the existing message history.
+
+---
+
+# 9. Understanding shouldcontinue()
+
+This function decides what happens after the AI agent executes.
+
+Our original code:
+
+```js
+const shouldcontinue = async (state) => {
+
+    const lastMessage =
+        state.messages[state.messages.length - 1];
+
+    if (lastMessage.tool_calls.length > 0) {
+        return "tools";
+    } else {
+        return "__end__";
+    }
+};
+```
+
+Let's understand the important part.
+
+### What is state.messages.length?
+
+It gives the total number of messages in the array.
+
+Example:
+
+```js
+const messages = ["Hello", "Hi", "How are you?"];
+
+console.log(messages.length);
+```
+
+Output:
+
+```text
+3
+```
+
+### What is state.messages.length - 1?
+
+Arrays use zero-based indexing.
+
+For an array containing three elements:
+
+| Element | Index |
+|---|---:|
+| Hello | 0 |
+| Hi | 1 |
+| How are you? | 2 |
+
+The last index is:
+
+```js
+messages.length - 1
+```
+
+Here:
+
+```js
+3 - 1 = 2
+```
+
+### Understanding the complete expression
+
+```js
+state.messages[state.messages.length - 1]
+```
+
+This retrieves the last message from the messages array.
+
+### What are tool_calls?
+
+AI messages can contain a `tool_calls` property.
+
+If the model wants to use a tool, it generates a tool call.
+
+Example, conceptually:
+
+```js
+{
+    tool_calls: [
+        {
+            name: "tavily_search",
+            args: {
+                query: "Latest AI news"
+            }
+        }
+    ]
+}
+```
+
+If there are tool calls, we send execution to the tools node.
+
+```js
+return "tools";
+```
+
+Otherwise, the AI has produced a normal response and the graph can finish.
+
+```js
+return "__end__";
+```
+
+### Safer version
+
+The `tool_calls` property should be checked safely:
+
+```js
+const shouldcontinue = (state) => {
+
+    const lastMessage = state.messages.at(-1);
+
+    if (lastMessage?.tool_calls?.length > 0) {
+        return "tools";
+    }
+
+    return "__end__";
+};
+```
+
+Here, `.at(-1)` retrieves the last array element.
+
+The optional chaining operator (`?.`) prevents errors if a property is missing.
+
+---
+
+# 10. Understanding the Complete Graph
+
+Now we combine everything.
+
+```js
+const graph = new StateGraph(MessagesAnnotation)
+
+    .addNode("agent", callLMM)
+
+    .addNode("tools", toolNode)
+
+    .addEdge("__start__", "agent")
+
+    .addEdge("tools", "agent")
+
+    .addConditionalEdges("agent", shouldcontinue)
+
+    .compile({
+        checkpointer: checkPointer
+    });
+```
+
+Let's understand the execution:
+
+1. The graph starts.
+2. The agent node receives the current state.
+3. The agent sends messages to the LLM.
+4. The LLM decides whether it needs a tool.
+5. If a tool call exists, the graph executes the tools node.
+6. The tools node executes the requested tool.
+7. The tool result is added to the message history.
+8. The graph returns to the agent.
+9. The agent processes the result and generates the final answer.
+10. If there are no more tool calls, the graph ends.
+
+### Workflow Diagram
+
+```text
+             START
+               |
+               v
+          AGENT NODE
+               |
+               v
+          Call LLM
+               |
+               v
+        Tool call exists?
+           /       \
+         YES        NO
+          |          |
+          v          v
+      TOOLS NODE    END
+          |
+          v
+     Execute Tool
+          |
+          v
+    Save Tool Result
+          |
+          v
+      AGENT NODE
+          |
+          v
+    Generate Answer
+          |
+          v
+          END
+```
+
+This is the main working logic of our AI assistant.
+
+---
+
+# 11. Understanding Memory in LangGraph
+
+This is another important concept.
+
+An AI model does not automatically remember previous API requests.
+
+If we send a new request to the model without previous messages, it generally has no access to the earlier conversation.
+
+We need a mechanism to preserve conversation state.
+
+LangGraph provides checkpointing for this purpose.
+
+### What is a Checkpointer?
+
+A checkpointer saves snapshots of graph state during execution.
+
+It allows a graph to continue a conversation using previously saved state.
+
+For example:
+
+First request:
+
+```text
+User: My name is Ankit.
+AI: Nice to meet you!
+```
+
+Second request:
+
+```text
+User: What is my name?
+AI: Your name is Ankit.
+```
+
+The second request can use the previous conversation because the graph retrieves the saved state.
+
+### What is MemorySaver?
+
+```js
+import { MemorySaver } from "@langchain/langgraph";
+
+const checkPointer = new MemorySaver();
+```
+
+`MemorySaver` is an in-memory checkpointer.
+
+It stores checkpoints in application memory while the process is running.
+
+Important limitations:
+
+- Data is not permanently stored on disk.
+- Restarting the Node.js process loses this in-memory checkpoint data.
+- It is useful for learning and development.
+- Production applications should use an appropriate persistent checkpointer.
+
+### What is thread_id?
+
+A thread represents a particular conversation.
+
+We pass a thread ID through the graph configuration.
+
+```js
+{
+    configurable: {
+        thread_id: "user123"
+    }
+}
+```
+
+This tells LangGraph which conversation's saved state to retrieve and update.
+
+Think of it like a conversation ID.
+
+For example:
+
+```text
+Thread 1: user123
+Thread 2: user456
+Thread 3: user789
+```
+
+Each thread can maintain its own conversation history.
+
+### Why is thread_id important?
+
+Imagine two users are using Bolu.
+
+User A:
+
+```text
+My name is Ankit.
+```
+
+User B:
+
+```text
+My name is Rahul.
+```
+
+If both users use the same thread ID, their conversation state can get mixed together.
+
+Therefore, every independent conversation needs its own thread ID.
+
+For a real multi-user application, generate or retrieve the thread ID securely and associate it with the authenticated user.
+
+### How does MemorySaver work with the graph?
+
+```js
+const checkPointer = new MemorySaver();
+
+const graph = new StateGraph(MessagesAnnotation)
+    // Add nodes and edges
+    .compile({
+        checkpointer: checkPointer
+    });
+```
+
+The checkpointer is connected during compilation.
+
+When we invoke the graph:
+
+```js
+const response = await graph.invoke(
+    {
+        messages: [
+            {
+                role: "user",
+                content: input
+            }
+        ]
+    },
+    {
+        configurable: {
+            thread_id: "user123"
+        }
+    }
+);
+```
+
+LangGraph uses the thread ID to load the previous checkpoint, execute the graph and save the updated state.
+
+**Important distinction:**
+
+- `MessagesAnnotation`: Defines the message state.
+- `MemorySaver`: Saves graph checkpoints.
+- `thread_id`: Identifies a conversation.
+- `StateGraph`: Defines and executes the workflow.
+
+These four things work together, but they are not the same thing.
+
+---
+
+# 12. Understanding the Express API
+
+Now let's understand how the frontend or API client communicates with our graph.
+
+```js
+app.post("/graph", async (req, res) => {
+
+    const { input } = req.body;
+
+    const response = await graph.invoke(
+        {
+            messages: [
+                {
+                    role: "user",
+                    content: input
+                }
+            ]
+        },
+        {
+            configurable: {
+                thread_id: "user123"
+            }
+        }
+    );
+
+    return res.status(200).json({
+        ai: response.messages[response.messages.length - 1].content
+    });
+});
+```
+
+### Step 1: Receive the input
+
+```js
+const { input } = req.body;
+```
+
+We extract the user's message from the request body.
+
+Example:
+
+```json
+{
+    "input": "Hello Bolu"
+}
+```
+
+### Step 2: Invoke the graph
+
+```js
+await graph.invoke({
+    messages: [
+        {
+            role: "user",
+            content: input
+        }
+    ]
+});
+```
+
+We send the user's message to LangGraph.
+
+### Step 3: Provide thread configuration
+
+```js
+{
+    configurable: {
+        thread_id: "user123"
+    }
+}
+```
+
+This identifies the conversation whose state should be loaded and updated.
+
+### Step 4: Get the final message
+
+```js
+response.messages[response.messages.length - 1]
+```
+
+This retrieves the last message in the graph's message history.
+
+### Step 5: Get the content
+
+```js
+response.messages[response.messages.length - 1].content
+```
+
+This accesses the content of the final message.
+
+### Step 6: Return the response
+
+```js
+res.status(200).json({
+    ai: response.messages[response.messages.length - 1].content
+});
+```
+
+Express sends the final response to the client.
+
+---
+
+# 13. Understanding the Complete Code Flow Through an Example
+
+Let's understand what happens when someone asks:
+
+"What is the latest news about artificial intelligence?"
+
+**Step 1: User sends the message**
+
+```json
+{
+    "input": "What is the latest news about artificial intelligence?"
+}
+```
+
+**Step 2: Express receives it**
+
+The `/graph` endpoint receives the message.
+
+**Step 3: LangGraph loads the conversation**
+
+It uses the thread ID to retrieve the previous conversation state, if one exists.
+
+**Step 4: Agent receives the state**
+
+The agent reads `state.messages` and sends the conversation to Groq.
+
+**Step 5: Groq decides to use Tavily**
+
+Because the user asks for latest news, the model can request a Tavily search.
+
+**Step 6: Conditional edge checks the response**
+
+The `shouldcontinue()` function checks whether the last AI message contains tool calls.
+
+**Step 7: ToolNode executes Tavily**
+
+Tavily searches for relevant information and returns results.
+
+**Step 8: Tool result returns to the agent**
+
+The graph follows the edge from tools back to agent.
+
+**Step 9: AI generates the final response**
+
+Groq processes the search results and generates a user-friendly answer.
+
+**Step 10: Graph ends and Express responds**
+
+The final AI message is returned to the client.
+
+---
+
+# 14. Important Concepts: Quick Revision
+
+| Concept | Meaning |
+|---|---|
+| State | Shared data used by graph nodes |
+| Annotation | Defines state fields and their update behavior |
+| MessagesAnnotation | Built-in message-based state |
+| Reducer | Determines how state updates are applied |
+| StateGraph | Creates and manages a graph workflow |
+| Node | A function or task inside the graph |
+| Edge | Connects two nodes |
+| Conditional Edge | Chooses the next node based on a condition |
+| LLM | Language model that understands and generates text |
+| bindTools() | Makes tools available to the model |
+| ToolNode | Executes requested tools |
+| tool_calls | Contains tool requests generated by the model |
+| Tavily | Web search tool |
+| invoke() | Executes a model or graph |
+| MemorySaver | In-memory graph checkpointer |
+| Checkpointer | Saves graph state snapshots |
+| thread_id | Identifies a conversation |
+| compile() | Builds the executable graph |
+
+---
+
+# 15. Important Improvements and Things to Remember
+
+The current code is a good learning implementation, but a few things should be improved before using it in a real application.
+
+### 1. Use a unique thread ID
+
+Currently:
+
+```js
+thread_id: "user123"
+```
+
+Every request uses the same thread.
+
+This is okay for a single-user experiment, but not for multiple users. Use a conversation ID associated with the authenticated user.
+
+### 2. MemorySaver is temporary
+
+MemorySaver stores data in application memory. It is not a permanent database.
+
+For persistent conversations across server restarts, use a persistent checkpointer supported by LangGraph.
+
+### 3. Add input validation
+
+Currently, the endpoint does not check whether the input is missing.
+
+Add:
+
+```js
+if (!input || typeof input !== "string") {
+    return res.status(400).json({
+        success: false,
+        message: "Please provide a valid input"
+    });
+}
+```
+
+### 4. Add error handling
+
+The graph invocation should be wrapped in a `try...catch` block so API errors do not crash the request handler.
+
+### 5. Use optional chaining
+
+Prefer:
+
+```js
+lastMessage?.tool_calls?.length > 0
+```
+
+Instead of accessing `tool_calls` without checking whether it exists.
+
+### 6. Remove unused imports
+
+The current code imports `GoogleGenAI`, `ChatGoogleGenerativeAI` and `Annotation`, but the active graph implementation does not use them.
+
+Remove unused imports to keep the code clean.
+
+### 7. Correct the response key
+
+Your original code has:
+
+```js
+{ "ai:": response.messages[response.messages.length - 1].content }
+```
+
+Prefer:
+
+```js
+{ ai: response.messages.at(-1).content }
+```
+
+The colon belongs in the JSON property separator, not inside the property name.
+
+---
+
+# 16. What I Learned Today
+
+Today, I learned how to build a tool-enabled AI assistant using LangGraph.
+
+My key learnings:
+
+1. How to initialize an Express backend.
+2. How to connect Groq with LangChain.
+3. How to create and register Tavily Search.
+4. How `bindTools()` makes tools available to an LLM.
+5. How `ToolNode` executes tool calls.
+6. How `MessagesAnnotation` provides built-in message state.
+7. How reducers update message history.
+8. How `StateGraph` manages nodes and edges.
+9. How conditional edges control workflow execution.
+10. How to access the last message using array indexing.
+11. How `MemorySaver` stores graph checkpoints.
+12. How `thread_id` separates conversations.
+13. How to connect Express APIs with LangGraph.
+14. How an AI agent decides when to use external tools.
+
+## Final Understanding
+
+The most important thing I learned is that **LangGraph is not just used to call an LLM. It helps manage the entire AI workflow.**
+
+The LLM understands the user's request and decides what action to take. LangGraph manages the execution flow, state and tool interactions. The checkpointer allows the application to continue conversations using saved state.
+
+Together, these components make it possible to build an AI assistant that can communicate, use tools and maintain conversation history.

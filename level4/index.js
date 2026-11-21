@@ -4,7 +4,7 @@ import dotenv from "dotenv";
 import { GoogleGenAI } from "@google/genai";
 import { ChatGoogleGenerativeAI } from "@langchain/google-genai"
 import { ChatGroq } from "@langchain/groq"
-import { Annotation, MessagesAnnotation, StateGraph } from "@langchain/langgraph";
+import { Annotation, MemorySaver, MessagesAnnotation, StateGraph } from "@langchain/langgraph";
 import { ToolNode } from "@langchain/langgraph/prebuilt";
 import { TavilySearch } from "@langchain/tavily";
 
@@ -71,9 +71,6 @@ app.use(express.json());
 //with langchine
 
 
-
-
-
 // const llm = new ChatGroq({
 //     model: "openai/gpt-oss-120b",
 //     temperature: 0,
@@ -122,6 +119,8 @@ const tool = new TavilySearch({
   // excludeDomains: [],
 });
 
+const checkPointer = new MemorySaver()
+
 const tools=[tool]
 const toolNode=new ToolNode(tools)
 
@@ -129,7 +128,7 @@ const llm = new ChatGroq({
     model: "openai/gpt-oss-120b",
     temperature: 0,
     maxTokens: 156
-}).bindTools(tools)
+}).bindTools(tool)
 
 
 const callLMM = async (state) => {
@@ -138,7 +137,7 @@ const callLMM = async (state) => {
     const response = await llm.invoke([
         {
             role: "system",
-            content: "You are Bolu, a helpful and intelligent AI assistant. Always provide accurate and clear answers. If you don't know the answer, use a relevant tool such as Tavily Search to find reliable information. Never guess or invent facts. Explain things simply and prioritize honesty and accuracy."
+            content:"You are Bolu, a smart, friendly, and reliable AI assistant. Provide accurate, clear, and simple answers. Use conversation history and available memory to answer questions about the user, previous discussions, preferences, and familiar topics. Respond directly to greetings, introductions, and simple questions without unnecessary tool calls. Use Tavily Search only when external or up-to-date information is needed, such as weather, news, prices, stock markets, or recent events. Never search unnecessarily, invent facts, or pretend to know unavailable information. If uncertain, admit it. Explain complex topics simply and prioritize honesty, accuracy, and usefulness."
         },
        ...state.messages
        ])
@@ -154,14 +153,13 @@ const shouldcontinue=async (state) => {
         return "__end__"
     }
 }
-
 const graph = new StateGraph(MessagesAnnotation)
     .addNode("agent", callLMM)
     .addNode("tools",toolNode)
     .addEdge("__start__","agent")
     .addEdge("tools","agent")
     .addConditionalEdges("agent",shouldcontinue)
-    .compile()
+    .compile({checkpointer:checkPointer})
 
 
 app.post("/graph",async(req,res)=>{
@@ -172,7 +170,10 @@ app.post("/graph",async(req,res)=>{
             role:"user",
             content:input
         }
-    ]})
+    ]},
+
+    {configurable:{thread_id:"user123"}}
+)
     console.log(response);
 
     return res.status(200).json({"ai:": response.messages[response.messages.length-1].content })
@@ -180,7 +181,7 @@ app.post("/graph",async(req,res)=>{
 })
 
 
-
+ap
 
 
 app.get("/", (req, res) => {

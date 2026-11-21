@@ -1,5 +1,6 @@
 import "dotenv/config";
 import { ChatGoogleGenerativeAI } from "@langchain/google-genai";
+import { application } from "express";
 
 const llm = new ChatGoogleGenerativeAI({
     model: "gemini-3.5-flash-lite",
